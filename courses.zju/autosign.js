@@ -131,7 +131,16 @@ let we_are_bruteforcing = [];
               // we_are_bruteforcing.push(rollcallId);
               // sendBoth(`[Auto Sign-in] Bruteforcing new number rollcall #${rollcallId}: ${rollcall.title} @ ${rollcall.course_title} by ${rollcall.created_by_name} (${rollcall.department_name})`);
               // batchNumberRollCall(rollcallId);
-              sendBoth(`[Auto Sign-in] New number rollcall #${rollcallId}: ${rollcall.title} @ ${rollcall.course_title} by ${rollcall.created_by_name} (${rollcall.department_name})`); // No more bruteforce as it comsumed all attempts
+              if(we_are_bruteforcing.includes(rollcallId)){
+                console.log("[Auto Sign-in] We are already handling rollcall #" + rollcallId);
+                return;
+              }
+              we_are_bruteforcing.push(rollcallId);
+              sendBoth(`[Auto Sign-in] Answering new number rollcall #${rollcallId}: ${rollcall.title} @ ${rollcall.course_title} by ${rollcall.created_by_name} (${rollcall.department_name})`);
+              answerTimetableNumberRollcall(rollcall).catch((error) => {
+                console.log(`[Auto Sign-in] Number Rollcall ${rollcallId} failed: `, error);
+                sendBoth(`[Auto Sign-in] Number Rollcall ${rollcallId} failed. Please answer manually.`);
+              });
               return;
             }
             // None of the above.
@@ -494,4 +503,50 @@ async function getNumberCode(rid) {
         return null;
       }
     });
+}
+
+async function answerTimetableNumberRollcall(rollcall) {
+  const rollcallId = rollcall.rollcall_id;
+  const startTime = new Date(rollcall.rollcall_time);
+  if (!rollcall.course_id || Number.isNaN(startTime.getTime())) {
+    sendBoth(`[Auto Sign-in] Number Rollcall ${rollcallId}: missing course or start time. Please answer manually.`);
+    return;
+  }
+
+  // The official web client queries timetable rollcalls by the UTC start date.
+  const params = new URLSearchParams({
+    course_ids: String(rollcall.course_id),
+    rollcall_date: startTime.toISOString().slice(0, 10),
+  });
+  const response = await courses.fetch(
+    "https://courses.zju.edu.cn/api/timetable_rollcalls?" + params,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch timetable rollcalls: HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const rollcalls = Array.isArray(data?.rollcalls) ? data.rollcalls : [];
+
+  // Radar responses use rollcall_id/course_id; timetable responses use id/course.id.
+  const matchingRollcall = rollcalls.find((candidate) => {
+    const candidateId = candidate.rollcall_id ?? candidate.id;
+    const candidateCourseId = candidate.course_id ?? candidate.course?.id;
+    return (
+      String(candidateId) === String(rollcallId) &&
+      (!candidateCourseId || String(candidateCourseId) === String(rollcall.course_id))
+    );
+  });
+  const numberCode = matchingRollcall?.number_code;
+
+  if (!numberCode) {
+    sendBoth(`[Auto Sign-in] Number Rollcall ${rollcallId}: number code is unavailable. Please answer manually.`);
+    return;
+  }
+
+  const success = await answerNumberRollcall(numberCode, rollcallId);
+  if (success) {
+    sendBoth(`[Auto Sign-in] Number Rollcall ${rollcallId} succeeded.`);
+  } else {
+    sendBoth(`[Auto Sign-in] Number Rollcall ${rollcallId} failed. Not retrying to preserve remaining attempts.`);
+  }
 }
